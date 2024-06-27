@@ -33,21 +33,14 @@
 #!csharp
 
 using System.Threading;
-//
-// Вычисление определенного интеграла
-//
+using System.Diagnostics;
+using System.Reflection;
+
 class DefiniteIntegral
 {
-    //
-    // a, b - границы отрезка, на котором происходит вычисление опредленного интеграла
-    // function - функция, для которой вычисляется определнный интеграл
-    // step - размер одного шага разбиения
-    // threadsNumber - число потоков, которые используются для вычислений
-    // 
     static Barrier barrier;
     public static double Solve(double a, double b, Func<double, double> function, double step, int threadsnumber)
     {
-        // отсюда надо начинать реализацию задачи
         barrier = new Barrier(threadsnumber);
         double square = 0.0;
         double lengthForThread = Math.Abs(b-a) / (double)threadsnumber;
@@ -78,6 +71,120 @@ class DefiniteIntegral
         barrier.SignalAndWait();
     }
 }
+
+class TrapezoidalRule
+{
+    public static double Solve(Func<double, double> f, double a, double b, double dx){
+        double square = 0;
+        double x1 = a;
+        double x2 = a + dx;
+        if (x2 <= a + Double.Epsilon) throw new ArgumentException("Too small value");
+        for(int i = 0; i < Math.Truncate(Math.Abs(b-a) / dx); i++)
+        {
+            square += ((f(x1) + f(x2)) / 2) * dx;
+            x1 += dx;
+            x2 += dx;
+        }
+        if (x2 > b) square += ((f(x1) + f(b)) / 2) * (b - x1);
+        return square;
+    }
+}
+
+public static void TimeCounter(string solveFunc, string step, int numthreads = 1)
+{
+    var SIN = (double x) => Math.Sin(x);
+    List<int> runtimes = new List<int>();
+    double dx = Convert.ToDouble(step);
+    double result = 0.0;
+    if (solveFunc == nameof(TrapezoidalRule)) for(int i = 0; i < 20; i++)
+    {
+        Stopwatch stopWatch = new Stopwatch();
+        stopWatch.Start();
+        result = TrapezoidalRule.Solve(SIN, -100, 100, dx);
+        stopWatch.Stop();
+        runtimes.Add(stopWatch.Elapsed.Milliseconds);
+    }
+    else if (solveFunc == nameof(DefiniteIntegral)) for(int i = 0; i < 20; i++)
+    {
+        Stopwatch stopWatch = new Stopwatch();
+        stopWatch.Start();
+        result = DefiniteIntegral.Solve(-100, 100, SIN, dx, numthreads);
+        stopWatch.Stop();
+        runtimes.Add(stopWatch.Elapsed.Milliseconds);
+    }
+    var averageRuntime = (from t in runtimes select t).Average();
+    Console.WriteLine($"Число потоков: {numthreads}; Шаг: {step}; Результат: {result}; Время: {averageRuntime}");
+}
+
+public static double ForListTimeCounter(string solveFunc, string step, int numthreads = 1)
+{
+    var SIN = (double x) => Math.Sin(x);
+    List<int> runtimes = new List<int>();
+    double dx = Convert.ToDouble(step);
+    double result = 0.0;
+    if (solveFunc == nameof(TrapezoidalRule)) for(int i = 0; i < 20; i++)
+    {
+        Stopwatch stopWatch = new Stopwatch();
+        stopWatch.Start();
+        result = TrapezoidalRule.Solve(SIN, -100, 100, dx);
+        stopWatch.Stop();
+        runtimes.Add(stopWatch.Elapsed.Milliseconds);
+    }
+    else if (solveFunc == nameof(DefiniteIntegral)) for(int i = 0; i < 20; i++)
+    {
+        Stopwatch stopWatch = new Stopwatch();
+        stopWatch.Start();
+        result = DefiniteIntegral.Solve(-100, 100, SIN, dx, numthreads);
+        stopWatch.Stop();
+        runtimes.Add(stopWatch.Elapsed.Milliseconds);
+    }
+    return (from t in runtimes select t).Average();
+}
+
+#!csharp
+
+// Соотношение величины шага и точности вычислений
+for(int i = 1; i < 7; i++) TimeCounter("DefiniteIntegral", $"1e-{i}", 24);
+// таким образом оптимальным по точности шагом является 1e-4 с точностью приблизительно 1e-14
+
+#!csharp
+
+// Соотношение времени выполнения и числа потоков
+#r "nuget:ScottPlot, 5.0.35"
+
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => w.Write(((ScottPlot.Plot)p).GetImageHtml(400, 300)), HtmlFormatter.MimeType);
+
+List<double> runtimesForThreads = new List<double>();
+List<int> numberThreads = new List<int>();
+for(int i = 2; i < 120; i+=15) 
+{
+  runtimesForThreads.Add(ForListTimeCounter("DefiniteIntegral", $"1e-4", i));
+  numberThreads.Add(i);
+}
+
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(runtimesForThreads, numberThreads);
+plt
+// по графику видно, что оптимальным числом потоков будет 48
+
+#!csharp
+
+// Сравнение времени работы многопоточного метода и однопоточного
+Console.Write($"Однопоточный: ");
+TimeCounter("TrapezoidalRule", $"1e-4");
+Console.Write($"Многопоточный: ");
+TimeCounter("DefiniteIntegral", $"1e-4", 48);
+// таким образом многопоточный метод быстрее однопоточного в 3,5 раза
+
+#!markdown
+
+Summary
+1) Оптимальный размер шага: 1e-4
+2) Оптимальное число потоков: 48
+3) Сравнение скоростей работы многопоточного и однопоточного методов:
+   1) В секундах: 15 на 50 соответственно
+   2) В процентах: многопоточный быстрее однопоточного на 250%
 
 #!csharp
 
