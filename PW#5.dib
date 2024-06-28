@@ -10,7 +10,7 @@
 
 **Результаты:** После выполнения работы Вы сможете:
 1. Передавать данные между потоками.
-2. Изучите примтив синхронизации, который используется в современных архитектурах высоко-нагруженных приложений Event Loop
+2. Изучите примитив синхронизации, который используется в современных архитектурах высоко-нагруженных приложений Event Loop
 
 
 **Материалы для самостоятельного изучения**.
@@ -20,10 +20,10 @@
 ## Задание.
 Реализовать приложение Ping-Pong.
 
-Создать дав потока, каждый из которых в цикле читает данные из BlockingCollection<Message>. После того, как поток прочитал объект из очереди, вызвал его метод Handle(), он создает новый объект класса Message и записывает его в очередь другого потока. Каждый поток всего должен обработать 100 сообщений.
+Создать два потока, каждый из которых в цикле читает данные из BlockingCollection<Message>. После того, как поток прочитал объект из очереди, вызвал его метод Handle(), он создает новый объект класса Message и записывает его в очередь другого потока. Каждый поток всего должен обработать 100 сообщений.
 
 **Указание**.
-1. Как запустить процесс обмена объектами Message между потоками? Первый объект Message пишем в очередь одного из потоков прямо из кода, коорый жти потоки стартовал.
+1. Как запустить процесс обмена объектами Message между потоками? Первый объект Message пишем в очередь одного из потоков прямо из кода, который эти потоки стартовал.
 2. Не забываем дождаться завершения работы потоков.
 
 #!csharp
@@ -56,11 +56,49 @@ class Message
 #!csharp
 
 using System.Collections.Concurrent;
+using System.Threading;
 
-var queue1 = new BlockingCollection<Message>(2); //очередь первого потока
-var queue2 = new BlockingCollection<Message>(2); //очередь второго потока
+var queue1 = new BlockingCollection<Message>(2);
+var queue2 = new BlockingCollection<Message>(2);
+queue1.Add(new Message());
 
-// Здесь писать решение
+Thread thread1 = new Thread(() => Thread1Func());
+Thread thread2 = new Thread(() => Thread2Func());
+
+thread1.Start();
+thread2.Start();
+
+thread1.Join();
+thread2.Join();
+
+Func<bool> canContinue;
+
+void Thread1Func()
+{
+  canContinue = () => true;
+  for(int i = 0; i < 100; i++)
+  {
+    var message = queue1.Take();
+    message.Handle();
+    Message newMessage = new Message();
+    queue2.Add(newMessage);
+  }
+  canContinue = () => false;
+}
+
+void Thread2Func()
+{  
+  for(int i = 0; i < 100; i++)
+  {
+    var message = queue2.Take();
+    message.Handle();
+    if(canContinue())
+    {
+      Message newMessage = new Message();
+      queue1.Add(newMessage);
+    }
+  }
+}
 
 #!csharp
 
