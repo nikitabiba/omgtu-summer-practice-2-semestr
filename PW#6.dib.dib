@@ -1,0 +1,408 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Практическая работа №6. Изучение производительности потоко-безопасных очередей.
+
+**Цель:** Определить лучшую потоко-безопасную коллекцию для выполнения интенсивной обработки входящих сообщений.
+
+**Результаты:** После выполнения работы Вы сможете:
+1. Назвать оптимальную коллекцию для обработки большого количества сообщений.
+2. Изучите примтив синхронизации Условная переманная.
+
+
+**Материалы для самостоятельного изучения**.
+1. [Потоко-безопасные коллекции](https://learn.microsoft.com/en-us/dotnet/standard/collections/thread-safe/)
+2. Условные переменные Глава 5 п.5.1. книги Г. Эндрюс Основы многопоточного, параллельного и распределенного программирования
+3. [Одна из реализаций условных переменных на .Net](https://learn.microsoft.com/ru-ru/dotnet/api/system.threading.manualresetevent?view=net-8.0)
+
+## Задание.
+Исследовать производительность BlockingCollection и ConcurrentQueue в сравнении с непотокобезопасной очередью.
+
+Для каждой потоко-безопасной очереди необходимо реализовать 2 потока: один записывает объект в очередь, а другой - читает объект из очереди.
+Для непотокобезопасной очереди реализовать два цикла - записи миллиона объектов в очередь и чтение миллиона объектов из очереди.
+
+Необходимо определить два промежутка времени:
+- время за которое поток или цикл обработает миллион объектов
+- время, необходимое на запись и чтение миллиона объектов из очереди.
+
+Сделать десять замеров по каждой коллекции. Все замеры показать на графике.
+
+Записать в ноутбуке вывод - какая из потоко-безопасных коллекций эффективнее. И выразить в процентах - скорость самой быстрой потоко-безопасной коллекции по сравнению с обычной очередью.
+
+**Указание**.
+1. Необходимо исключить из замеров время, необходимое для запуска и остановки потоков, то есть посчитать чистое время, необходимое для обработки объектов.
+Для этого следует использовать условные события, которые позволят убедиться, что оба потока запустились и готовы читать и писать объекты и только потом запускать таймер.
+2. Для итогового вывода сравнивать усредненные значения.
+
+#!csharp
+
+#r "nuget: xunit, 2.8.1"
+using System.Threading;
+using Xunit;
+
+class Message
+{
+    static int messageHandled = 0;
+    int id;
+    public Message()
+    {
+        id = Thread.CurrentThread.ManagedThreadId;
+    }
+
+    public void Handle()
+    {
+        Interlocked.Increment(ref messageHandled);
+        Assert.NotEqual(id, Thread.CurrentThread.ManagedThreadId);
+    }
+
+    public void OneThreadHandle()
+    {
+        Interlocked.Increment(ref messageHandled);
+    }
+
+    public static void Check()
+    {
+        Assert.Equal(1000000, messageHandled);
+    }
+}
+
+#!csharp
+
+// BlockingCollection для записи и чтения объектов
+
+#r "nuget:ScottPlot, 5.0.35"
+
+using System.Collections.Concurrent;
+using System.Threading;
+using System.Diagnostics;
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => w.Write(((ScottPlot.Plot)p).GetImageHtml(400, 300)), HtmlFormatter.MimeType);
+
+var queue = new BlockingCollection<Message>(1000000);
+
+ManualResetEvent startEvent = new ManualResetEvent(false);
+ManualResetEvent finishEvent = new ManualResetEvent(false);
+
+void ThreadAFunc()
+{
+  startEvent.Set();
+  for(int i = 0; i < 1000000; i++)
+  {
+    Message message = new Message();
+    queue.Add(message);
+  }
+}
+
+void ThreadBFunc()
+{  
+  for (int i = 0; i < 1000000; i++)
+  {
+    var newmessage = queue.Take();
+    newmessage.Handle();
+  }
+  finishEvent.Set();
+}
+
+List<double> runtimes = new List<double>();
+List<double> iterations = new List<double>(); 
+
+for(int i = 1; i < 11; i++)
+{
+  Thread threadA = new Thread(() => ThreadAFunc());
+  Thread threadB = new Thread(() => ThreadBFunc());
+
+  Stopwatch sw = new Stopwatch();
+  sw.Start();
+
+  threadA.Start();
+  threadB.Start();
+  threadA.Join();
+
+  startEvent.WaitOne();
+  finishEvent.WaitOne();
+  sw.Stop();
+  
+  runtimes.Add(sw.Elapsed.Milliseconds);
+  iterations.Add(i);
+}
+
+Console.WriteLine("Время(в миллисекундах) работы потоков на каждой из десяти итераций");
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(iterations, runtimes);
+plt
+
+#!csharp
+
+// BlockingCollection для обработки объектов
+
+using System.Collections.Concurrent;
+using System.Threading;
+using System.Diagnostics;
+
+var queue = new BlockingCollection<Message>(1000000);
+
+ManualResetEvent startEvent = new ManualResetEvent(false);
+ManualResetEvent finishEvent = new ManualResetEvent(false);
+
+void ThreadAFunc()
+{
+  for(int i = 0; i < 1000000; i++)
+  {
+    Message message = new Message();
+    queue.Add(message);
+  }
+}
+
+void ThreadBFunc()
+{
+  startEvent.Set();
+  for (int i = 0; i < 1000000; i++)
+  {
+    var newmessage = queue.Take();
+    newmessage.Handle();
+  }
+  finishEvent.Set();
+}
+
+List<double> runtimes = new List<double>();
+List<double> iterations = new List<double>(); 
+
+for(int i = 1; i < 11; i++)
+{
+  Thread threadA = new Thread(() => ThreadAFunc());
+  Thread threadB = new Thread(() => ThreadBFunc());
+
+  Stopwatch sw = new Stopwatch();
+  sw.Start();
+
+  threadA.Start();
+  threadB.Start();
+  threadA.Join();
+
+  startEvent.WaitOne();
+  finishEvent.WaitOne();
+  sw.Stop();
+  
+  runtimes.Add(sw.Elapsed.Milliseconds);
+  iterations.Add(i);
+}
+
+Console.WriteLine("Время(в миллисекундах) работы потоков на каждой из десяти итераций");
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(iterations, runtimes);
+plt
+
+#!csharp
+
+// ConcurrentQueue для записи и чтения объектов
+
+using System.Collections.Concurrent;
+using System.Threading;
+using System.Diagnostics;
+
+ConcurrentQueue<Message> cq = new ConcurrentQueue<Message>();
+
+ManualResetEvent startEvent = new ManualResetEvent(false);
+ManualResetEvent finishEvent = new ManualResetEvent(false);
+
+void Thread1Func()
+{
+  startEvent.Set();
+  for(int i = 0; i < 1000000; i++)
+  {
+    Message message = new Message();
+    cq.Enqueue(message);
+  }
+}
+
+void Thread2Func()
+{  
+  for (int i = 0; i < 1000000; i++)
+  {
+    Message newmessage;
+    cq.TryDequeue(out newmessage);
+    newmessage.Handle();
+  }
+  finishEvent.Set();
+}
+
+List<double> runtimes = new List<double>();
+List<double> iterations = new List<double>(); 
+
+for(int i = 1; i < 11; i++)
+{
+  Thread thread1 = new Thread(() => Thread1Func());
+  Thread thread2 = new Thread(() => Thread2Func());
+
+  Stopwatch sw = new Stopwatch();
+  sw.Start();
+
+  thread1.Start();
+  thread2.Start();
+  thread2.Join();
+
+  startEvent.WaitOne();
+  finishEvent.WaitOne();
+  sw.Stop();
+  
+  runtimes.Add(sw.Elapsed.Milliseconds);
+  iterations.Add(i);
+}
+
+Console.WriteLine($"Среднее время работы: {(from t in runtimes select t).Average()}");
+
+Console.WriteLine("Время(в миллисекундах) работы потоков на каждой из десяти итераций");
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(iterations, runtimes);
+plt
+
+#!csharp
+
+// ConcurrentQueue для обработки объектов
+
+using System.Collections.Concurrent;
+using System.Threading;
+using System.Diagnostics;
+
+ConcurrentQueue<Message> cq = new ConcurrentQueue<Message>();
+
+ManualResetEvent startEvent = new ManualResetEvent(false);
+ManualResetEvent finishEvent = new ManualResetEvent(false);
+
+void Thread1Func()
+{
+  for(int i = 0; i < 1000000; i++)
+  {
+    Message message = new Message();
+    cq.Enqueue(message);
+  }
+}
+
+void Thread2Func()
+{
+  startEvent.Set();
+  for (int i = 0; i < 1000000; i++)
+  {
+    Message newmessage;
+    cq.TryDequeue(out newmessage);
+    newmessage.Handle();
+  }
+  finishEvent.Set();
+}
+
+List<double> runtimes = new List<double>();
+List<double> iterations = new List<double>(); 
+
+for(int i = 1; i < 11; i++)
+{
+  Thread thread1 = new Thread(() => Thread1Func());
+  Thread thread2 = new Thread(() => Thread2Func());
+
+  Stopwatch sw = new Stopwatch();
+  sw.Start();
+
+  thread1.Start();
+  thread2.Start();
+  thread2.Join();
+
+  startEvent.WaitOne();
+  finishEvent.WaitOne();
+  sw.Stop();
+  
+  runtimes.Add(sw.Elapsed.Milliseconds);
+  iterations.Add(i);
+}
+
+Console.WriteLine("Время(в миллисекундах) работы потоков на каждой из десяти итераций");
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(iterations, runtimes);
+plt
+
+#!csharp
+
+// Queue для записи и чтения объектов
+
+using System.Diagnostics;
+
+Queue<Message> q = new Queue<Message>();
+
+List<double> runtimes = new List<double>();
+List<double> iterations = new List<double>();
+
+for (int i = 1; i < 11; i++)
+{
+  Stopwatch sw = new Stopwatch();
+  sw.Start();
+
+  for(int j = 0; j < 1000000; j++)
+  {
+    Message message = new Message();
+    q.Enqueue(message);
+  }
+
+  for(int j = 0; j < 1000000; j++)
+  {
+    Message newmessage = q.Dequeue();
+    newmessage.OneThreadHandle();
+  }
+
+  sw.Stop();
+  runtimes.Add(sw.Elapsed.Milliseconds);
+  iterations.Add(i);
+}
+
+Console.WriteLine($"Среднее время работы: {(from t in runtimes select t).Average()}");
+
+Console.WriteLine("Время(в миллисекундах) работы одного потока на каждой из десяти итераций");
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(iterations, runtimes);
+plt
+
+#!csharp
+
+// Queue для обработки объектов
+
+using System.Diagnostics;
+
+Queue<Message> q = new Queue<Message>();
+
+List<double> runtimes = new List<double>();
+List<double> iterations = new List<double>();
+
+for (int i = 1; i < 11; i++)
+{
+  Stopwatch sw = new Stopwatch();
+
+  for(int j = 0; j < 1000000; j++)
+  {
+    Message message = new Message();
+    q.Enqueue(message);
+  }
+
+  sw.Start();
+
+  for(int j = 0; j < 1000000; j++)
+  {
+    Message newmessage = q.Dequeue();
+    newmessage.OneThreadHandle();
+  }
+
+  sw.Stop();
+  runtimes.Add(sw.Elapsed.Milliseconds);
+  iterations.Add(i);
+}
+
+Console.WriteLine("Время(в миллисекундах) работы одного потока на каждой из десяти итераций");
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(iterations, runtimes);
+plt
+
+#!markdown
+
+## Вывод
+Самая быстрая потокобезопасная коллекция: ConcurrentQueue
+
+QoncurrentQueue в сравнении с Queue при записи и чтении одного миллиона объектов message работает на 50% медленее(80 мс и 40 мс в среднем соответственно)
