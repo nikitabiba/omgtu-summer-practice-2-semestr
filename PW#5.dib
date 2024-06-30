@@ -56,11 +56,47 @@ class Message
 #!csharp
 
 using System.Collections.Concurrent;
+using System.Threading;
 
-var queue1 = new BlockingCollection<Message>(2); //очередь первого потока
-var queue2 = new BlockingCollection<Message>(2); //очередь второго потока
+var queue1 = new BlockingCollection<Message>(2);
+var queue2 = new BlockingCollection<Message>(2);
+queue1.Add(new Message());
 
-// Здесь писать решение
+Thread thread1 = new Thread(() => Thread1Func());
+Thread thread2 = new Thread(() => Thread2Func());
+
+thread1.Start();
+thread2.Start();
+
+thread1.Join();
+thread2.Join();
+
+void Thread1Func()
+{
+  int counter = 100;
+  while(counter != 0)
+  {
+    var message = queue1.Take();
+    message.Handle();
+    counter--;
+    Message newMessage = new Message();
+    queue2.Add(newMessage);
+  }
+}
+
+void Thread2Func()
+{  
+  int counter = 100;
+  while(counter != 0)
+  {
+    var message = queue2.Take();
+    message.Handle();
+    counter--;
+    if (counter == 0) break;
+    Message newMessage = new Message();
+    queue1.Add(newMessage);
+  }
+}
 
 #!csharp
 
