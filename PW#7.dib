@@ -1,0 +1,185 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Практическая работа №7.Реализация потока обработки команад.
+
+**Цель:** Реализовать основу для многопоточного сервера приложений.
+
+**Результаты:** После выполнения работы Вы сможете:
+1. Обрабатывать множество операций в несколько потоков.
+2. Останавливать потоки по запросу извне.
+
+## Задание.
+Пусть операция задана интерфейсом
+
+#!csharp
+
+#r "nuget: xunit, 2.8.1"
+
+using Xunit;
+using System.Threading;
+using System.Collections.Concurrent;
+
+public interface ICommand
+{
+    void Execute();
+}
+
+class HardStopCommand : ICommand
+{
+    ServerThread thread;
+
+    public HardStopCommand(ServerThread thread) => this.thread = thread;
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != thread.thread) throw new Exception();
+        thread.canRun = () => false;
+    }
+}
+
+class SoftStopCommand : ICommand
+{
+    ServerThread thread;
+
+    public SoftStopCommand(ServerThread thread) => this.thread = thread;
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != thread.thread) throw new Exception();
+        thread.canRun = () => thread.queue.Count > 0;
+    }
+}
+
+class CommandWrapper : ICommand
+{
+    ICommand insidecmd;
+    Action before;
+
+    public CommandWrapper(ICommand insidecmd, Action before)
+    {
+        this.insidecmd = insidecmd;
+        this.before = before;
+    }
+
+    public void Execute()
+    {
+        before();
+        insidecmd.Execute();
+    }
+}
+
+class DummyCommand : ICommand
+{
+    public bool Called { get; set;}
+
+    public DummyCommand() => this.Called = false;
+
+    public void Execute() => this.Called = true;
+}
+
+class ServerThread
+{
+    internal Thread thread;
+
+    internal BlockingCollection<ICommand> queue = new BlockingCollection<ICommand>(1000);
+
+    internal Func<bool> canRun = () => true;
+
+    public ServerThread()
+    {
+        thread = new Thread(() => ThreadFunc());
+        thread.Start();
+    }
+
+    void ThreadFunc()
+    {
+        while(canRun())
+        {
+            ICommand command = queue.Take();
+            try 
+            { 
+                command.Execute(); 
+            }
+            catch(Exception exception) 
+            { 
+                ExceptionHandler(command, exception);
+            }
+        }
+    }
+
+    void ExceptionHandler(ICommand command, Exception exception) { } 
+
+    public void Put(ICommand command)
+    {
+        queue.Add(command);
+    }
+}
+
+class UnitTest
+{
+    [Fact]
+    public static void HardTest()
+    {
+        ManualResetEvent waitVar = new ManualResetEvent(false);
+
+        ServerThread t = new ServerThread();
+
+        CommandWrapper hardStop = new CommandWrapper(new HardStopCommand(t), () => waitVar.WaitOne());
+
+        t.Put(hardStop);
+
+        DummyCommand dummy = new DummyCommand();
+        t.Put(dummy);
+
+        waitVar.Set();
+
+        t.thread.Join();
+
+        Assert.False(dummy.Called);
+    }
+
+    [Fact]
+    public static void SoftTest()
+    {
+        ManualResetEvent waitVar = new ManualResetEvent(false);
+
+        ServerThread t = new ServerThread();
+
+        CommandWrapper softStop = new CommandWrapper(new SoftStopCommand(t), () => waitVar.WaitOne());
+
+        t.Put(softStop);
+
+        DummyCommand dummy = new DummyCommand();
+        t.Put(dummy);
+
+        waitVar.Set();
+
+        t.thread.Join();
+
+        Assert.True(dummy.Called);
+    }
+}
+
+UnitTest.HardTest();
+UnitTest.SoftTest();
+
+#!markdown
+
+Классы, наследующие интерфейс ICommand будем называть **Командами.**
+
+Реализовать класс ServerThread и команды по hard и soft завершению потока. 
+
+ServerThread может менять свое поведение для обработки следующей Команды.
+Исключение, выброшенное из Команды, перехватывается и передается вместе с самой Командой в ExceptionHandler (см. ЛР №5) Примечание. Наличие реализованного обработчика исключений не обязательно для выполнения данной задачи. 
+
+Команда HardStop приводит к немедленной остановке потока, несмотря на то, что в очереди потока есть еще Команды.
+Команда  SoftStop останавливает поток, когда в очереди потока закончатся все Команды.
+
+Команды HardStop и SoftStop успешно выполняются только в потоке, который они должны остановить, в противном случае выбрасывают исключение.
+Отсутствие Команд в очереди потока не должно требовать значительных затрат процессорного времени. Значительными считаются затраты, которые зависят от времени простоя потока.
+
+Написать проверку, которая гарантирует правильное выполнение команд HardStop и SoftStop.
