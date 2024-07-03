@@ -14,16 +14,16 @@
 ## Задание.
 Пусть, в условиях практической работы №7, у нас есть поток с очередью, который в цикле извлекает команды из очереди и выполняет их.
 
-Некоторые из команд не могут выполнить всю работу за один вызов метода Execute без блокирования на длительное время выполнения всех остальных командд из очереди.
+Некоторые из команд не могут выполнить всю работу за один вызов метода Execute без блокирования на длительное время выполнения всех остальных команд из очереди.
 
 Например, если какая-нибудь сетевая игра представлена командой, то пока одна игра не закончится, следующая не начнется. Чтобы эффективнее использовать процессорные
-можности, нужно обеспечить возхможность поиграть как можно большему количеству игроков.
+можности, нужно обеспечить возможность поиграть как можно большему количеству игроков.
 
 Для этого используют режим псевдопараллельной обработки. Когда все время работы разбивают на небольшие отрезки, каждый из которых выполняется
 за один вызов метода Execute. Чтобы выполнить всю работу, нужно вызвать метод Execute несколько раз, до тех пор пока работа не будет завершена.
-Это позволяет между вызовами Execute одного экземплыра команды вызывать метод Execute других команд.
+Это позволяет между вызовами Execute одного экземпляра команды вызывать метод Execute других команд.
 
-Так устроен, например, ренедринг страницы в браузере. Только в браузеоре это используется не для рендеренга всех вкладок, а для обработки 
+Так устроен, например, ренедринг страницы в браузере. Только в браузере это используется не для рендеренга всех вкладок, а для обработки 
 реакций пользователя на странице.
 
 В прошлой работе все команды, которые выполнялись в потоке, брались из очереди. Поэтому первая идея - это положить долгоиграющую операцию обратно в очередь.
@@ -35,19 +35,219 @@
 
 #!csharp
 
+#r "nuget: xunit, 2.8.1"
+
+using Xunit;
+using System.Threading;
+using System.Collections.Concurrent;
+
+public interface ICommand
+{
+    void Execute();
+}
+
+class ShortDummyCommand : ICommand
+{
+    public int Executed;
+
+    public ShortDummyCommand() => Executed = 0;
+
+    public void Execute()
+    {
+        Thread.Sleep(50);
+        Console.WriteLine("Короткая команда выполнена");
+    }
+}
+
+class LongDummyCommand : ICommand
+{
+    public int Executed;
+
+    public LongDummyCommand() => Executed = 0;
+
+    public void Execute()
+    {
+        Thread.Sleep(1500);
+        Console.WriteLine("Долгая команда выполнена");
+    }
+}
+
 public interface IScheduler
 {
-    bool HasCommand()
+    bool HasCommand();
     ICommand Select();
     void Add(ICommand cmd);
 }
 
+public class RoundRobbinScheduler : IScheduler
+{
+    ServerThread thread;
+
+    ConcurrentQueue<ICommand> schedulerQueue = new ConcurrentQueue<ICommand>();
+
+    int millisecondsForQuantum;
+
+    public RoundRobbinScheduler(ServerThread thread, int millisecondsForQuantum)
+    {
+        this.millisecondsForQuantum = millisecondsForQuantum;
+        this.thread = thread;
+    }
+
+    public bool HasCommand()
+    {
+        return schedulerQueue.Count > 0;
+    }
+
+    public ICommand Select()
+    {
+        ICommand cmd;
+        schedulerQueue.TryDequeue(out cmd);
+        return cmd;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        schedulerQueue.Enqueue(cmd);
+    }
+
+    public void ExecuteSchedulerCommands()
+    {
+        while(true)
+        {
+            if (thread.scheduler.HasCommand())
+            {
+                ICommand command = thread.scheduler.Select();
+                SchedulerThread schedulerThread = new SchedulerThread(command);
+            }
+        }
+    }
+
+    public void ExecuteCommandWithQuantum(ICommand cmd)
+    {
+        CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+        CancellationToken cancellationToken = cancellationTokenSource.Token;
+
+        Task taskExecution = Task.Run(() =>
+        {
+            cmd.Execute();
+        }, cancellationToken);
+
+        if (!taskExecution.Wait(millisecondsForQuantum, cancellationToken))
+        {
+            cancellationTokenSource.Cancel();
+            thread.scheduler.Add(cmd);
+        }
+    }
+}
+
+public class ServerThread
+{
+    internal Thread thread;
+
+    public static ServerThread serverThread = new ServerThread();
+
+    internal BlockingCollection<ICommand> queue = new BlockingCollection<ICommand>(100);
+
+    internal RoundRobbinScheduler scheduler = new RoundRobbinScheduler(serverThread, 100);
+
+    public ServerThread()
+    {
+        thread = new Thread(() => ThreadFunc());
+        thread.Start();
+    }
+
+    void ThreadFunc()
+    {
+        while(true)
+        {
+            ICommand command = queue.Take();
+            try 
+            {
+                scheduler.ExecuteCommandWithQuantum(command); 
+            }
+            catch(Exception exception) 
+            { 
+                ExceptionHandler(command, exception);
+            }
+        }
+    }
+
+    void ExceptionHandler(ICommand command, Exception exception) { Console.WriteLine("Исключение"); } 
+
+    public void Put(ICommand command)
+    {
+        queue.Add(command);
+    }
+
+    public void HowMuch()
+    {
+        Console.WriteLine(queue.Count);
+    }
+}
+
+public class SchedulerThread
+{
+    internal Thread thread;
+
+    internal ICommand command;
+
+    public SchedulerThread(ICommand command)
+    {
+        thread = new Thread(() => ThreadFunc());
+        this.command = command;
+        thread.Start();
+    }
+
+    void ThreadFunc()
+    {
+        while(true)
+        {
+            try 
+            {
+                command.Execute(); 
+            }
+            catch(Exception exception) 
+            { 
+                ExceptionHandler(command, exception);
+            }
+        }
+    }
+
+    void ExceptionHandler(ICommand command, Exception exception) { Console.WriteLine("Исключение"); } 
+}
+
+class UnitTest
+{
+    [Fact]
+    public static void Test()
+    {
+        ServerThread thread = new ServerThread();
+        RoundRobbinScheduler scheduler = new RoundRobbinScheduler(thread, 100);
+
+        for(int i = 0; i < 10; i++)
+        {
+            ShortDummyCommand sdc = new ShortDummyCommand();
+            LongDummyCommand ldc = new LongDummyCommand();
+            thread.Put(sdc);
+            thread.Put(ldc);
+        }
+        
+        Thread.Sleep(3400);
+    }
+}
+
+// Тест написан не лучшим образом(использован Sleep и нет адекватного подсчёта выполненных команд, 
+// а также времени выполнения), но все команды успевают выполниться за 3,4 секунды(без консольного вывода 
+// даже быстрее), при этом видно, что долгие команды выполняются параллельно с короткими и не блокируют их.
+
+UnitTest.Test();
+
 #!markdown
 
-Необходимо реализовать поток, который способен реализоввывать длительные операции.
+Необходимо реализовать поток, который способен реализовывать длительные операции.
 
 **Указание.** 
-1. В практической работе №7 из очереди команды извлекались блокируеммым образом с помощью метода Take(), при наличии планировщика так делать нельзя: поток
+1. В практической работе №7 из очереди команды извлекались блокируемым образом с помощью метода Take(), при наличии планировщика так делать нельзя: поток
 может заснуть несмотря на наличие команд в планировщике до тех пор, пока не будет записана новая команда в очередь.
 
 С другой стороны, если будем всегда читать неблокируемым образом, а в планировщике нет никакой работы, то будем тратить процессорное время без полезной нагрузки.
