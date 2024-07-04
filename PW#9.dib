@@ -1,0 +1,219 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Практическая работа №9. Реализация длительных операций.
+
+**Цель:** Предоставить возможность выполнения команд, для полного завершения которых требуется более одного вызова Execute.
+
+**Результаты:** После выполнения работы Вы сможете:
+1. Выполнять длительные операции в отдельном потоке без монопольного использования потока в течение длительного времени.
+3. Прерывать выполнение таких команд. 
+
+
+## Задание.
+Если для полного выполнения команд потребуется более одного вызова Execute, необходимо такую команду добавить в планировщик.
+
+Для иллюстрации выполненной работы определить команду
+
+#!csharp
+
+#r "nuget: xunit, 2.8.1"
+
+using Xunit;
+using System.Threading;
+using System.Collections.Concurrent;
+
+public interface ICommand
+{
+    void Execute();
+}
+
+public class TestCommand(int id) : ICommand
+{
+    public int counter = 0;
+
+    public int id = id;
+    public void Execute()
+    {
+        Console.WriteLine($"Поток {id} вызов {++counter}"); // а поток всегда ведь будет один - тот, который в ServerThread
+        Thread.Sleep(250);                                  // , тогда логичнее будет давать id команды наверное, для
+    }                                                       // демонстрации выполнения команд
+}
+
+class HardStopCommand : ICommand
+{
+    ServerThread thread;
+
+    public HardStopCommand(ServerThread thread) => this.thread = thread;
+
+    public void Execute()
+    {
+        thread.canRun = () => false;
+    }
+}
+
+class CommandWrapper : ICommand
+{
+    ICommand insidecmd;
+    Action before;
+
+    public CommandWrapper(ICommand insidecmd, Action before)
+    {
+        this.insidecmd = insidecmd;
+        this.before = before;
+    }
+
+    public void Execute()
+    {
+        before();
+        insidecmd.Execute();
+    }
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+public class RoundRobbinScheduler : IScheduler
+{
+    ServerThread thread;
+
+    public ConcurrentQueue<ICommand> schedulerQueue = new ConcurrentQueue<ICommand>();
+
+    public int millisecondsForQuantum;
+
+    public RoundRobbinScheduler(ServerThread thread, int millisecondsForQuantum)
+    {
+        this.millisecondsForQuantum = millisecondsForQuantum;
+        this.thread = thread;
+    }
+
+    public bool HasCommand()
+    {
+        return schedulerQueue.Count > 0;
+    }
+
+    public ICommand Select()
+    {
+        ICommand cmd;
+        schedulerQueue.TryDequeue(out cmd);
+        return cmd;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        schedulerQueue.Enqueue(cmd);
+    }
+
+    public void HowMuch()
+    {
+        Console.WriteLine(thread.scheduler.schedulerQueue.Count());
+    }
+}
+
+public class ServerThread
+{
+    internal Thread thread;
+
+    public static ServerThread serverThread = new ServerThread();
+
+    internal BlockingCollection<ICommand> queue = new BlockingCollection<ICommand>(100);
+
+    internal RoundRobbinScheduler scheduler = new RoundRobbinScheduler(serverThread, 100);
+
+    internal Func<bool> canRun = () => true;
+
+    public ServerThread()
+    {
+        thread = new Thread(() => ThreadFunc());
+        thread.Start();
+    }
+
+    void ThreadFunc()
+    {
+        while(canRun())
+        {
+            ICommand cmd = queue.Take();
+            try 
+            {
+                CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+                CancellationToken cancellationToken = cancellationTokenSource.Token;
+
+                Task taskExecution = Task.Run(() =>
+                {
+                    cmd.Execute();
+                }, cancellationToken);
+
+                if (!taskExecution.Wait(scheduler.millisecondsForQuantum, cancellationToken))
+                {
+                    queue.Add(cmd);
+                    scheduler.Add(cmd);
+                    cancellationTokenSource.Cancel();
+                }
+            }
+            catch(Exception exception) 
+            { 
+                ExceptionHandler(cmd, exception);
+            }
+        }
+    }
+
+    void ExceptionHandler(ICommand command, Exception exception) { Console.WriteLine(exception); } 
+
+    public void Put(ICommand command)
+    {
+        queue.Add(command);
+    }
+
+    public int HowMuch()
+    {
+        return queue.Count;
+    }
+}
+
+class UnitTest
+{
+    [Fact]
+    public static void Test()
+    {
+        ManualResetEvent waitVar = new ManualResetEvent(false);
+
+        ServerThread thread = new ServerThread();
+        RoundRobbinScheduler scheduler = new RoundRobbinScheduler(thread, 100);
+        TestCommand tc1 = new TestCommand(1);
+        TestCommand tc2 = new TestCommand(2);
+        TestCommand tc3 = new TestCommand(3);
+        TestCommand tc4 = new TestCommand(4);
+        TestCommand tc5 = new TestCommand(5);
+        TestCommand[] tcList = {tc1, tc2, tc3, tc4, tc5};
+        foreach(TestCommand tc in tcList) thread.Put(tc);
+
+        CommandWrapper hardStop = new CommandWrapper(new HardStopCommand(thread), () => waitVar.WaitOne());
+        thread.Put(hardStop);
+
+        while(tc5.counter != 3) { }
+        waitVar.Set();
+
+        thread.thread.Join();
+
+        scheduler.HowMuch(); // так как команды каждый раз не удалялись из очереди ServerThread, а добавлялись
+                             // в конец и в очередь планировщика, то в очереди планировщика в итоге
+                             // будет как минимум 15 команд, то есть 5 команд и каждая по 3 раза.
+                             // Следить за неповторением команд бессмысленно, поскольку на практике команды могут
+                             // повторяться
+
+        Assert.Equal(6, thread.HowMuch()); // 5 TestCommand и 1 HardStop
+    }
+}
+
+UnitTest.Test();
+
+#!markdown
+
+Необходимо проиллюстрировать выполнение 5 экземпляров TestCommand 3 раза, затем остановить поток с помощью HardStop.
