@@ -14,7 +14,7 @@
 ## Задание.
 Поскольку длительная операция выполняется в течение некоторого момента времени, то может возникнуть необходимость
 в предоставлении дополнительной информации, влияющей на ход выполнения. Поскольку Команды и источник данных часто находятся в разных потоках,
-то сделать это надо потоко-безопасным образом. Самый простой способ - используя идиому Производитель-Поребитель, в нашем случае - очередь.
+то сделать это надо потоко-безопасным образом. Самый простой способ - используя идиому Производитель-Потребитель, в нашем случае - очередь.
 
 Набор данных, предназначенных для Команды будем называть сообщением. Можно использовать любую подходящую конструкцию языка программирования для 
 представления сообщения. Необходимо учесть, что скорость доставки сообщений может быть выше, чем скорость обработки, а значит очередь сообщений должна быть
@@ -22,10 +22,10 @@
 одновремнно работающих длительных Команд, нельзя использовать потоко-безопасные очереди. 
 
 Возможный вариант реализации - оставить одну потоко-безопасную очередь для потока, а для Команд использовать обычные очереди. Осталось только решить, как сообщение
-излеченное из очереди потока попадет в очередь Команды. Один из возможных вариантов:
+излеченное из очереди потока попадёт в очередь Команды. Один из возможных вариантов:
 1. Каждая команда имеет уникальный идентификатор.
-2. Сообщение содержит уникальный идентификатор Команлды, которому оно адресовано.
-3. Для потока создаем специальную Длительную Команду, которая назвается Роутером. Он хранит коллекцию пар (id Команды, ссылка на очередь Команды). При вызове метода Execute этой 
+2. Сообщение содержит уникальный идентификатор Команды, которой оно адресовано.
+3. Для потока создаем специальную Длительную Команду, которая назвается Роутером. Он хранит коллекцию пар (id Команды, ссылка на очередь Команды). При вызове метода Execute этого 
 Роутера, если очередь потока не пуста, происходит чтение очередного сообщения и по id Команды определяется очередь, куда это сообщение записывается.
 Если id Команды не определен, на консоль выводится сообщение о невозможности доставить сообщение неизвестному адресату.
 При старте новой Команды, ее очередь необходимо добавить в коллекцию Роутера. При остановке Команды - очередь удаляется из коллекции Роутера.
@@ -36,3 +36,289 @@
 1. [Паттерн Сообщение](https://www.enterpriseintegrationpatterns.com/patterns/messaging/Message.html)
 2. [Паттерн Роутер - весь раздел про Роутеры](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageRoutingIntro.html)
 3. [Обмен сообщеними](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageConstructionIntro.html)
+
+#!csharp
+
+#r "nuget: xunit, 2.8.1"
+
+using Xunit;
+using System.Threading;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+
+public interface ICommand
+{
+    void Execute();
+}
+
+public class DummyCommand : ICommand
+{
+    int Executed;
+    public DummyCommand() => Executed = 0;
+    public void Execute() { Executed = 1; }
+}
+
+public class RouterCommand : ICommand
+{
+    public Dictionary<int, Queue<Message>> routerDictionary = new Dictionary<int, Queue<Message>>();
+
+    public ServerThread thread;
+
+    public RouterCommand(ServerThread thread) => this.thread = thread;
+
+    public void Execute()
+    {
+        foreach(int id in thread.scheduler.idForRouter) if (!routerDictionary.Keys.Contains(id)) routerDictionary[id] = new Queue<Message>();
+        QueueObject qo = thread.queue.Take();
+        if (!routerDictionary.Keys.Contains(qo.msg.id)) Console.WriteLine($"Команда с id '{qo.msg.id}' не найдена");
+        else 
+        {
+            routerDictionary[qo.msg.id].Enqueue(qo.msg);
+            Console.WriteLine($"Сообщение с id '{qo.msg.id}' добавлено");
+        }
+    }
+
+    public void PrintRouterDictionary()
+    {
+        foreach (int id in routerDictionary.Keys)
+        {
+            Console.WriteLine($"Сообщения для команды с id '{id}'':");
+            foreach(Message msg in routerDictionary[id])
+            {
+                Console.WriteLine(msg.text);
+            }
+            Console.WriteLine();
+        }
+    }
+}
+
+public class LongDummyCommand : ICommand
+{
+    public int id;
+    
+    public Queue<Message> commandQueue = new Queue<Message>();
+
+    public LongDummyCommand(int id) => this.id = id;
+
+    public void Execute()
+    {
+        Thread.Sleep(300);
+        Console.WriteLine($"Долгая команда с id '{id}' выполнена");
+    }
+}
+
+public class Message
+{
+    public int id;
+    public string text;
+
+    public Message(int id, string text)
+    {
+        this.id = id;
+        this.text = text;
+    }
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+public class RoundRobbinScheduler : IScheduler
+{
+    ServerThread thread;
+
+    SchedulerThread schedulerThread = new SchedulerThread();
+
+    public List<int> idForRouter = new List<int>();
+
+    internal ConcurrentQueue<ICommand> schedulerQueue = new ConcurrentQueue<ICommand>();
+
+    int millisecondsForQuantum;
+
+    public RoundRobbinScheduler(ServerThread thread, int millisecondsForQuantum)
+    {
+        this.millisecondsForQuantum = millisecondsForQuantum;
+        this.thread = thread;
+    }
+
+    public bool HasCommand()
+    {
+        return schedulerQueue.Count > 0;
+    }
+
+    public ICommand Select()
+    {
+        ICommand cmd;
+        schedulerQueue.TryDequeue(out cmd);
+        return cmd;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        schedulerQueue.Enqueue(cmd);
+    }
+
+    public void ExecuteSchedulerCommands()
+    {
+        while(true)
+        {
+            if (thread.scheduler.HasCommand())
+            {
+                ICommand command = thread.scheduler.Select();
+                schedulerThread.Put(command);
+            }
+        }
+    }
+
+    public void ExecuteCommandWithQuantum(ICommand cmd)
+    {
+        CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+        CancellationToken cancellationToken = cancellationTokenSource.Token;
+
+        Task taskExecution = Task.Run(() =>
+        {
+            cmd.Execute();
+        }, cancellationToken);
+
+        if (!taskExecution.Wait(millisecondsForQuantum, cancellationToken))
+        {
+            cancellationTokenSource.Cancel();
+            thread.scheduler.Add(cmd);
+            if (cmd is LongDummyCommand longcmd) idForRouter.Add(longcmd.id);
+        }
+    }
+
+    public void HowMuch()
+    {
+        Console.WriteLine(thread.scheduler.schedulerQueue.Count());
+    }
+}
+
+public class ServerThread
+{
+    internal Thread thread;
+
+    public static ServerThread serverThread = new ServerThread();
+
+    internal BlockingCollection<QueueObject> queue = new BlockingCollection<QueueObject>(100);
+
+    internal RoundRobbinScheduler scheduler = new RoundRobbinScheduler(serverThread, 100);
+
+    public ServerThread()
+    {
+        thread = new Thread(() => ThreadFunc());
+        thread.Start();
+    }
+
+    void ThreadFunc()
+    {
+        while(true)
+        {
+            QueueObject qo = queue.Take();
+            try 
+            {
+                if (qo.msg == null) scheduler.ExecuteCommandWithQuantum(qo.cmd);
+            }
+            catch(Exception exception) 
+            {
+                if (qo.cmd != null) ExceptionHandler(qo.cmd, exception);
+            }
+        }
+    }
+
+    void ExceptionHandler(ICommand command, Exception exception) { Console.WriteLine(exception); } 
+
+    public void Put(QueueObject qo)
+    {
+        queue.Add(qo);
+    }
+
+    public void HowMuch()
+    {
+        Console.WriteLine(queue.Count);
+    }
+}
+
+public class SchedulerThread
+{
+    internal Thread thread;
+
+    internal BlockingCollection<ICommand> schedulerThreadQueue = new BlockingCollection<ICommand>(100);
+
+    public SchedulerThread()
+    {
+        thread = new Thread(() => ThreadFunc());
+        thread.Start();
+    }
+
+    void ThreadFunc()
+    {
+        while(true)
+        {
+            ICommand command = schedulerThreadQueue.Take();
+            try
+            {
+                // if (command is RouterCommand rcmd) Thread.Sleep(200);
+                command.Execute(); 
+            }
+            catch(Exception exception) 
+            { 
+                ExceptionHandler(command, exception);
+            }
+        }
+    }
+
+    public void Put(ICommand cmd)
+    {
+        schedulerThreadQueue.Add(cmd);
+    }
+
+    void ExceptionHandler(ICommand command, Exception exception) { Console.WriteLine(exception); } 
+}
+
+public class QueueObject
+{
+    public ICommand? cmd;
+    public Message? msg;
+
+    public QueueObject(ICommand cmd = null, Message msg = null)
+    {
+        this.cmd = cmd;
+        this.msg = msg;
+    }
+}
+
+class UnitTest
+{
+    [Fact]
+    public static void Test()
+    {
+        ServerThread thread = new ServerThread();
+        RoundRobbinScheduler scheduler = new RoundRobbinScheduler(thread, 100);
+
+        for(int i = 1; i < 3; i++)
+        {
+            thread.Put(new QueueObject(new LongDummyCommand(i)));
+        }
+
+        RouterCommand router = new RouterCommand(thread);
+
+        for(int i = 1; i < 3; i++)
+        {
+            thread.Put(new QueueObject(router));
+            thread.Put(new QueueObject(new DummyCommand(), new Message(i, $"Сообщение с id '{i}'")));
+        }
+
+        thread.Put(new QueueObject(router));
+        thread.Put(new QueueObject(new DummyCommand(), new Message(10, $"Сообщение с id '10'")));
+        
+        Thread.Sleep(500);
+        Console.WriteLine();
+        router.PrintRouterDictionary();
+    }
+}
+
+UnitTest.Test();
